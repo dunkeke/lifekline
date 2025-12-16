@@ -267,14 +267,24 @@ def hour_pillar(day_stem: str, time: datetime.time) -> Tuple[str, str]:
     
     return HEAVENLY_STEMS[stem_index], EARTHLY_BRANCHES[branch_index]
 
+def _is_yang_stem(stem: str) -> bool:
+    """判断天干阴阳（甲丙戊庚壬为阳，其余为阴）"""
+    return HEAVENLY_STEMS.index(stem) % 2 == 0
+
+
+def _is_forward_luck(birth_date: datetime.date, gender: str) -> bool:
+    """根据“阴男阳女逆，阳男阴女顺”确定大运排法"""
+    year_stem, _ = year_pillar(birth_date)
+    is_yang = _is_yang_stem(year_stem)
+    return (is_yang and gender == "男") or (not is_yang and gender == "女")
+
+
 def calculate_start_luck_age(birth_datetime: datetime.datetime, gender: str) -> int:
     """计算起运岁数：按生日与最近节气差，3天折合1岁"""
-    year = birth_datetime.year
-    is_yang_year = year % 2 == 0
     birth_date = birth_datetime.date()
 
     prev_term, next_term = get_adjacent_solar_terms(birth_date)
-    if (is_yang_year and gender == "男") or (not is_yang_year and gender == "女"):
+    if _is_forward_luck(birth_date, gender):
         # 顺排取下一个节气
         days = (next_term - birth_date).days
     else:
@@ -284,27 +294,25 @@ def calculate_start_luck_age(birth_datetime: datetime.datetime, gender: str) -> 
     start_age = math.ceil(days / 3)
     return start_age
 
-def compute_big_luck(day_index: int, month_index: int, start_age: int, 
-                    gender: str, birth_year: int, cycles: int = 8) -> List[Tuple[int, Tuple[str, str]]]:
+def compute_big_luck(day_index: int, month_index: int, start_age: int,
+                    gender: str, birth_date: datetime.date, cycles: int = 8) -> List[Tuple[int, Tuple[str, str]]]:
     """计算大运"""
     luck = []
-    
-    # 判断顺排还是逆排
-    is_yang_year = birth_year % 2 == 0
-    forward = (is_yang_year and gender == "男") or (not is_yang_year and gender == "女")
-    
+
+    forward = _is_forward_luck(birth_date, gender)
+
     current_index = month_index
     age = start_age
-    
-    for i in range(cycles):
+
+    for _ in range(cycles):
         if forward:
             current_index = (current_index + 1) % 60
         else:
             current_index = (current_index - 1) % 60
-        
+
         luck.append((age, ganzhi_from_index(current_index)))
         age += 10
-    
+
     return luck
 
 def get_ten_god(day_stem: str, target_stem: str) -> str:
@@ -674,8 +682,8 @@ def main():
             # 计算大运
             month_index = (HEAVENLY_STEMS.index(m_stem) * 12 + EARTHLY_BRANCHES.index(m_branch)) % 60
             day_index = (HEAVENLY_STEMS.index(d_stem) * 12 + EARTHLY_BRANCHES.index(d_branch)) % 60
-            bazi.big_luck = compute_big_luck(day_index, month_index, bazi.start_luck_age, 
-                                           gender, local_datetime.year)
+            bazi.big_luck = compute_big_luck(day_index, month_index, bazi.start_luck_age,
+                                           gender, local_datetime.date())
             
             # 显示八字命盘
             col1, col2 = st.columns(2)
