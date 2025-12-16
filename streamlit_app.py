@@ -155,25 +155,47 @@ class BaZiChart:
             "大运": [f"{age}岁: {stem}{branch}" for age, (stem, branch) in self.big_luck]
         }
 
-def get_timezone_from_location(location_name: str) -> Optional[str]:
-    """根据地点名称获取时区"""
+def get_timezone_from_location(location_name: str) -> Tuple[Optional[str], Optional[float]]:
+    """根据地点名称获取时区和经度"""
     try:
         geolocator = Nominatim(user_agent="bazi_app")
         location = geolocator.geocode(location_name)
         if location:
             tf = TimezoneFinder()
             timezone_str = tf.timezone_at(lng=location.longitude, lat=location.latitude)
-            return timezone_str
-    except:
+            return timezone_str, location.longitude
+    except Exception:
         pass
-    return None
+    return None, None
 
 def calculate_true_solar_time(local_time: datetime.datetime, longitude: float) -> datetime.datetime:
-    """计算真太阳时"""
+    """计算真太阳时（按经度修正，当地时间需为带时区的datetime）"""
     # 时差 = 经度差 * 4分钟/度
     time_diff_minutes = (longitude - 120.0) * 4  # 120°E是北京时间基准
-    true_solar = local_time + datetime.timedelta(minutes=time_diff_minutes)
-    return true_solar
+    return local_time + datetime.timedelta(minutes=time_diff_minutes)
+
+
+def get_adjacent_solar_terms(date: datetime.date) -> Tuple[datetime.date, datetime.date]:
+    """获取出生日前后的节气日期（使用节气起始日近似）"""
+    terms = []
+    for term, month, start, _ in SolarTerms.SOLAR_TERMS:
+        terms.append(datetime.date(date.year, month, start))
+
+    # 也将下一年的立春加入，避免年尾出生找不到下一节气
+    terms.append(datetime.date(date.year + 1, 2, 4))
+
+    terms = sorted(terms)
+    prev_term = terms[0]
+    next_term = terms[-1]
+
+    for t in terms:
+        if t <= date:
+            prev_term = t
+        if t > date:
+            next_term = t
+            break
+
+    return prev_term, next_term
 
 def ganzhi_from_index(index: int) -> Tuple[str, str]:
     """根据索引获取干支"""
@@ -195,25 +217,28 @@ def year_pillar(date: datetime.date) -> Tuple[str, str]:
     return HEAVENLY_STEMS[stem_index], EARTHLY_BRANCHES[branch_index]
 
 def month_pillar(year_stem: str, date: datetime.date) -> Tuple[str, str]:
-    """计算月柱"""
-    # 节气换月
+    """计算月柱，按照节气切换月份"""
+    # 通过节气判断月建，立春为寅月起点
+    month_branch_order = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1]  # 寅到丑
+    # 以每月上旬节气作为切换点
     solar_term = SolarTerms.get_solar_term(date)
-    
-    # 简化版月支：寅月为正月
-    if date.month == 1:
-        branch_index = 2  # 寅
-    elif date.month == 2:
-        branch_index = 3  # 卯
-    else:
-        branch_index = (date.month + 1) % 12
-    
+
+    # 如果在节气前（没有命中当月节气), 使用上个月的节气
+    branch_index = month_branch_order[date.month - 1]
+    if solar_term is None:
+        # 当月未到节气，回退一月
+        prev_month_index = (date.month - 2) % 12
+        branch_index = month_branch_order[prev_month_index]
+
     # 月干：根据年干推算
     stem_index_year = HEAVENLY_STEMS.index(year_stem)
     # 甲己之年丙作首，乙庚之岁戊为头...
     month_stem_starts = [2, 4, 6, 8, 0, 2, 4, 6, 8, 0]  # 甲年从丙开始
     start_stem = month_stem_starts[stem_index_year]
-    stem_index = (start_stem + branch_index - 2) % 10
-    
+    # 月份序号以寅月为1
+    month_number = month_branch_order.index(branch_index) + 1
+    stem_index = (start_stem + month_number - 1) % 10
+
     return HEAVENLY_STEMS[stem_index], EARTHLY_BRANCHES[branch_index]
 
 def day_pillar(date: datetime.date) -> Tuple[str, str]:
@@ -242,50 +267,52 @@ def hour_pillar(day_stem: str, time: datetime.time) -> Tuple[str, str]:
     
     return HEAVENLY_STEMS[stem_index], EARTHLY_BRANCHES[branch_index]
 
+def _is_yang_stem(stem: str) -> bool:
+    """判断天干阴阳（甲丙戊庚壬为阳，其余为阴）"""
+    return HEAVENLY_STEMS.index(stem) % 2 == 0
+
+
+def _is_forward_luck(birth_date: datetime.date, gender: str) -> bool:
+    """根据“阴男阳女逆，阳男阴女顺”确定大运排法"""
+    year_stem, _ = year_pillar(birth_date)
+    is_yang = _is_yang_stem(year_stem)
+    return (is_yang and gender == "男") or (not is_yang and gender == "女")
+
+
 def calculate_start_luck_age(birth_datetime: datetime.datetime, gender: str) -> int:
-    """计算起运岁数"""
-    # 阳年男/阴年女顺排，阴年男/阳年女逆排
-    year = birth_datetime.year
-    is_yang_year = year % 2 == 0  # 简化判断
-    
-    # 计算出生日到下一个节气/上一个节气的天数
+    """计算起运岁数：按生日与最近节气差，3天折合1岁"""
     birth_date = birth_datetime.date()
-    
-    # 简化计算：3天=1岁
-    if (is_yang_year and gender == "男") or (not is_yang_year and gender == "女"):
-        # 顺排，找下一个节气
-        days = 15  # 简化值
+
+    prev_term, next_term = get_adjacent_solar_terms(birth_date)
+    if _is_forward_luck(birth_date, gender):
+        # 顺排取下一个节气
+        days = (next_term - birth_date).days
     else:
-        # 逆排，找上一个节气
-        days = 15  # 简化值
-    
-    start_age = days // 3
-    if days % 3 != 0:
-        start_age += 1
-    
+        # 逆排取上一个节气
+        days = (birth_date - prev_term).days
+
+    start_age = math.ceil(days / 3)
     return start_age
 
-def compute_big_luck(day_index: int, month_index: int, start_age: int, 
-                    gender: str, birth_year: int, cycles: int = 8) -> List[Tuple[int, Tuple[str, str]]]:
+def compute_big_luck(day_index: int, month_index: int, start_age: int,
+                    gender: str, birth_date: datetime.date, cycles: int = 8) -> List[Tuple[int, Tuple[str, str]]]:
     """计算大运"""
     luck = []
-    
-    # 判断顺排还是逆排
-    is_yang_year = birth_year % 2 == 0
-    forward = (is_yang_year and gender == "男") or (not is_yang_year and gender == "女")
-    
+
+    forward = _is_forward_luck(birth_date, gender)
+
     current_index = month_index
     age = start_age
-    
-    for i in range(cycles):
+
+    for _ in range(cycles):
         if forward:
             current_index = (current_index + 1) % 60
         else:
             current_index = (current_index - 1) % 60
-        
+
         luck.append((age, ganzhi_from_index(current_index)))
         age += 10
-    
+
     return luck
 
 def get_ten_god(day_stem: str, target_stem: str) -> str:
@@ -589,10 +616,13 @@ def main():
             
             # 获取时区（简化版，实际需调用API）
             timezone_str = "Asia/Shanghai"  # 默认
-            if location and location != "北京":
-                tz_info = get_timezone_from_location(location)
+            location_longitude = None
+            if location:
+                tz_info, longitude = get_timezone_from_location(location)
                 if tz_info:
                     timezone_str = tz_info
+                if longitude:
+                    location_longitude = longitude
             
             # 转换为UTC+8（北京时间）进行比较
             local_tz = pytz.timezone(timezone_str)
@@ -601,11 +631,9 @@ def main():
             beijing_dt = local_dt.astimezone(beijing_tz)
             
             # 真太阳时计算（简化）
-            true_solar_dt = local_datetime
-            if location:
-                # 简化的经度估计
-                location_longitude = 116.4 if "北京" in location else 121.47 if "上海" in location else 120.15
-                true_solar_dt = calculate_true_solar_time(local_datetime, location_longitude)
+            true_solar_dt = local_dt
+            if location_longitude is not None:
+                true_solar_dt = calculate_true_solar_time(local_dt, location_longitude)
             
             # 显示时间信息
             col1, col2, col3 = st.columns(3)
@@ -654,8 +682,8 @@ def main():
             # 计算大运
             month_index = (HEAVENLY_STEMS.index(m_stem) * 12 + EARTHLY_BRANCHES.index(m_branch)) % 60
             day_index = (HEAVENLY_STEMS.index(d_stem) * 12 + EARTHLY_BRANCHES.index(d_branch)) % 60
-            bazi.big_luck = compute_big_luck(day_index, month_index, bazi.start_luck_age, 
-                                           gender, local_datetime.year)
+            bazi.big_luck = compute_big_luck(day_index, month_index, bazi.start_luck_age,
+                                           gender, local_datetime.date())
             
             # 显示八字命盘
             col1, col2 = st.columns(2)
